@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller build output (rebuilt from the .spec files)
+build/
+dist/
+
+# Personal Claude Code settings
+.claude/settings.local.json
+
+# Installers are attached to GitHub Releases, not kept in the repository
+setup.exe
+*.exe
+
+# Editor workspace (holds local paths)
+*.code-workspace

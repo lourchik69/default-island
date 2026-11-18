@@ -1,0 +1,75 @@
+{
+  "manifest_version": 3,
+  "name": "Default Island Bridge",
+  "version": "3.0.0",
+  "description": "Connects music and video players in the browser, and its downloads, to Default Island.",
+  "minimum_chrome_version": "111",
+  "permissions": [
+    "downloads"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:28491/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://soundcloud.com/*",
+        "https://www.soundcloud.com/*",
+        "https://open.spotify.com/*",
+        "https://music.yandex.ru/*",
+        "https://music.yandex.com/*",
+        "https://music.yandex.by/*",
+        "https://music.yandex.kz/*",
+        "https://music.youtube.com/*",
+        "https://www.youtube.com/*",
+        "https://www.deezer.com/*",
+        "https://music.apple.com/*",
+        "https://listen.tidal.com/*",
+        "https://vk.com/*",
+        "https://vk.ru/*",
+        "https://bandcamp.com/*",
+        "https://*.bandcamp.com/*",
+        "https://www.twitch.tv/*",
+        "https://vimeo.com/*",
+        "https://rutube.ru/*",
+        "https://www.mixcloud.com/*"
+      ],
+      "js": [
+        "page_hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://soundcloud.com/*",
+        "https://www.soundcloud.com/*",
+        "https://open.spotify.com/*",
+        "https://music.yandex.ru/*",
+        "https://music.yandex.com/*",
+        "https://music.yandex.by/*",
+        "https://music.yandex.kz/*",
+        "https://music.youtube.com/*",
+        "https://www.youtube.com/*",
+        "https://www.deezer.com/*",
+        "https://music.apple.com/*",
+        "https://listen.tidal.com/*",
+        "https://vk.com/*",
+        "https://vk.ru/*",
+        "https://bandcamp.com/*",
+        "https://*.bandcamp.com/*",
+        "https://www.twitch.tv/*",
+        "https://vimeo.com/*",
+        "https://rutube.ru/*",
+        "https://www.mixcloud.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
