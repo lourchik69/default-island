@@ -5,6 +5,9 @@ Link, WhatsApp, Viber, Skype, Teams…). A call in progress is recognised by a
 known calling app capturing from the microphone (Discord, Telegram, Teams,
 Zoom…). "Answer" and "Decline" press the buttons of that toast through UI
 Automation, so they work with any app whose toast has such buttons.
+
+The names of the browsers' tabs are read here too (BrowserTabs), with the
+same UI Automation.
 """
 import ctypes
 import ctypes.wintypes
@@ -14,6 +17,8 @@ import queue
 import re
 import threading
 import time
+
+import psutil
 
 # Process / package / toast names of calling apps (case-folded, no ".exe").
 _APPS = {
@@ -238,6 +243,129 @@ _user32.EnumWindows.argtypes = [_WNDENUMPROC, ctypes.wintypes.LPARAM]
 _user32.IsWindowVisible.argtypes = [ctypes.wintypes.HWND]
 _user32.GetWindowTextLengthW.argtypes = [ctypes.wintypes.HWND]
 _user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
+
+
+# --------------------------------------------------------------------------
+# Tabs open in the browsers
+# --------------------------------------------------------------------------
+
+BROWSER_PROCESSES = frozenset({
+    "firefox.exe", "chrome.exe", "brave.exe", "msedge.exe", "opera.exe",
+    "opera_gx.exe", "vivaldi.exe", "browser.exe", "chromium.exe", "librewolf.exe",
+    "waterfox.exe", "floorp.exe", "zen.exe", "arc.exe",
+})
+
+
+class BrowserTabs(threading.Thread):
+    """Names of the tabs open in the browsers, read with UI Automation.
+
+    The browser window's title names only the tab in front; a video playing
+    in a tab behind it shows up only here. Reading takes a few milliseconds
+    per window and happens on this thread, only when asked for.
+    """
+
+    REFRESH_SEC = 2.0
+
+    def __init__(self):
+        super().__init__(daemon=True, name="browser-tabs")
+        self._wanted = threading.Event()
+        self._fresh = threading.Event()
+        self._names = ()
+        self._read_at = -1e9
+        self._stopping = False
+
+    def names(self, wait=0.0):
+        """The tab names read lately. An older reading than REFRESH_SEC asks
+        for a new one and waits up to `wait` seconds for it."""
+        if time.monotonic() - self._read_at > self.REFRESH_SEC:
+            self._fresh.clear()
+            self._wanted.set()
+            if wait > 0:
+                self._fresh.wait(wait)
+        return self._names
+
+    def fresh(self):
+        return time.monotonic() - self._read_at <= self.REFRESH_SEC
+
+    def stop(self):
+        self._stopping = True
+        self._wanted.set()
+
+    def run(self):
+        import comtypes
+        import comtypes.client
+
+        try:
+            comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)
+            owns_com = True
+        except OSError:
+            owns_com = False
+        uia = module = None
+        try:
+            while True:
+                self._wanted.wait()
+                self._wanted.clear()
+                if self._stopping:
+                    break
+                names = ()
+                try:
+                    if uia is None:
+                        module = ToastButtons._uia_module()
+                        uia = comtypes.client.CreateObject(module.CUIAutomation, interface=module.IUIAutomation)
+                    names = self._read(uia, module)
+                except Exception:
+                    logging.debug("Could not read the browser tabs", exc_info=True)
+                self._names = names
+                self._read_at = time.monotonic()
+                self._fresh.set()
+        finally:
+            uia = module = None
+            if owns_com:
+                comtypes.CoUninitialize()
+
+    @staticmethod
+    def _browser_windows():
+        found = []
+        names = {}
+
+        def callback(hwnd, _):
+            if _user32.IsWindowVisible(hwnd) and _user32.GetWindowTextLengthW(hwnd) > 0:
+                pid = ctypes.wintypes.DWORD()
+                _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value not in names:
+                    try:
+                        names[pid.value] = psutil.Process(pid.value).name().casefold()
+                    except psutil.Error:
+                        names[pid.value] = ""
+                if names[pid.value] in BROWSER_PROCESSES:
+                    found.append(hwnd)
+            return True
+
+        _user32.EnumWindows(_WNDENUMPROC(callback), 0)
+        return found
+
+    @classmethod
+    def _read(cls, uia, module):
+        strip_type = uia.CreatePropertyCondition(module.UIA_ControlTypePropertyId, module.UIA_TabControlTypeId)
+        tab_type = uia.CreatePropertyCondition(module.UIA_ControlTypePropertyId, module.UIA_TabItemControlTypeId)
+        names = []
+        for hwnd in cls._browser_windows()[:12]:
+            try:
+                window = uia.ElementFromHandle(hwnd)
+                # The tab strip comes before the pages in the tree, so looking
+                # for it first never walks through a whole web page.
+                strip = window.FindFirst(module.TreeScope_Descendants, strip_type)
+                if not strip:
+                    continue
+                tabs = strip.FindAll(module.TreeScope_Descendants, tab_type)
+                for index in range(min(tabs.Length, 200)):
+                    name = tabs.GetElement(index).CurrentName
+                    if name:
+                        names.append(name)
+            except Exception:
+                logging.debug("Could not read the tabs of one browser window", exc_info=True)
+        return tuple(names)
+_user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
 _user32.GetWindow.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint]
 _user32.GetWindow.restype = ctypes.wintypes.HWND
 _user32.IsIconic.argtypes = [ctypes.wintypes.HWND]
@@ -249,10 +377,6 @@ _SW_RESTORE = 9
 
 
 def _process_names():
-    try:
-        import psutil
-    except ImportError:
-        return {}
     names = {}
     for process in psutil.process_iter(["pid", "name"]):
         name = process.info.get("name") or ""

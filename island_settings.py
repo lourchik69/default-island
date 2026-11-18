@@ -72,6 +72,12 @@ register({
     ),
     "Звонки": ("Calls", "Дзвінки"),
     "Перевод текста": ("Lyrics translation", "Переклад тексту"),
+    "Источники": ("Sources", "Джерела"),
+    "Видео с YouTube": ("YouTube videos", "Відео з YouTube"),
+    "Показывать в островке видео с youtube.com как трек. YouTube Music показывается всегда": (
+        "Show videos from youtube.com in the island like a track. YouTube Music always shows",
+        "Показувати в острівці відео з youtube.com як трек. YouTube Music показується завжди",
+    ),
     "Перевод поющейся строки под ней в развёрнутом острове. Строки песни отправляются в Google Переводчик": (
         "The sung line translated under it in the open island. The lines are sent to Google Translate",
         "Переклад рядка, що співається, під ним у розгорнутому острові. Рядки пісні надсилаються в Google Перекладач",
@@ -2670,7 +2676,7 @@ class SettingsWindow(AnimatedDialog):
         "right_zone", "idle_view", "weather_city", "calls_enabled",
         "music_only", "gear_button", "dnd_button", "volume_button", "repeat_button",
         "like_button", "hud_enabled", "clipboard_enabled", "recording_enabled",
-        "privacy_dots_place", "lyrics_translate",
+        "privacy_dots_place", "lyrics_translate", "youtube_video",
         "scale_collapsed", "scale_expanded", "collapsed_title",
         "lyrics_enabled", "lyrics_karaoke", "lyrics_offset", "real_visualizer", "track_animation", "volume_target",
         "timer_button_enabled", "mic_button_enabled", "privacy_dots_enabled",
@@ -3114,6 +3120,14 @@ class SettingsWindow(AnimatedDialog):
             self.draft[key] = self.island.config[key]
 
     def build_music(self, layout):
+        layout.addWidget(make_caption(tr("Источники")))
+        card, card_layout = make_card()
+        self.add_toggle(
+            card_layout, "youtube_video", tr("Видео с YouTube"),
+            tr("Показывать в островке видео с youtube.com как трек. "
+               "YouTube Music показывается всегда"),
+        )
+        layout.addWidget(card)
         layout.addWidget(make_caption(tr("Текст песен")))
         card, card_layout = make_card()
         self.add_toggle(

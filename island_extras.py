@@ -161,12 +161,15 @@ NOTIFICATION_SECONDS = 6.0
 MAX_BANNERS = 6
 MAX_SHELF_ITEMS = 12
 UPDATE_CHECK_EVERY_SEC = 24 * 3600
+UPDATE_RETRY_SEC = 30 * 60
 # Downloads not reported for this long are dropped (the browser went away).
 DOWNLOADS_STALE_SEC = 15.0
 ROW_HEIGHT = 40.0
 SIDE_SIZE = 28.0
 QUICK_ICONS = ("output", "mic", "screenshot", "lock", "note", "clipboard")
 MAX_CLIPS = 10
+MAX_CLIP_IMAGES = 3
+MAX_CLIP_TEXT = 200_000
 HUD_SECONDS = 1.6
 HUD_WIDTH = 230.0
 RECORD_RED = QColor(255, 69, 58)
@@ -317,6 +320,10 @@ class UpdateChecker(QObject):
             os.replace(path + ".part", path)
         except Exception:
             logging.warning("Could not download the update", exc_info=True)
+            try:
+                os.remove(path + ".part")
+            except OSError:
+                pass
             self.downloaded.emit("", "")
             return
         self.downloaded.emit(version, path)
@@ -452,7 +459,9 @@ class ExtrasMixin:
         self.hud = None  # ("volume" | "brightness", percent, muted, until)
         self._hud_seen = {}  # last volume / brightness read
         self._next_hud_check = 0.0
-        self.clips = []  # newest first: ("text", text, None) or ("image", label, QPixmap)
+        # Newest first: ("text", text, None, one-line preview) or
+        # ("image", label, thumbnail QPixmap, the whole QImage).
+        self.clips = []
         self._clip_ignore_until = 0.0
         self._clipboard_hooked = False
         self.tray = None
@@ -1190,20 +1199,25 @@ class ExtrasMixin:
             label = tr("Картинка {w}×{h}").format(w=image.width(), h=image.height())
             thumb = QPixmap.fromImage(image.scaled(
                 96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            clip = ("image", label, thumb)
+            # The picture itself is kept too, so it can be copied back whole.
+            clip = ("image", label, thumb, image)
             message = tr("Скопирована картинка {w}×{h}").format(w=image.width(), h=image.height())
         elif mime.hasText():
             text = mime.text()
             if not text.strip():
                 return
-            clip = ("text", text[:5000], None)
-            preview = " ".join(text.split())
-            preview = preview if len(preview) <= 40 else preview[:39] + "…"
+            # The row in the history shows one line: the start, spaces folded.
+            line = " ".join(text[:400].split())
+            clip = ("text", text[:MAX_CLIP_TEXT], None, line)
+            preview = line if len(line) <= 40 else line[:39] + "…"
             message = tr("Скопировано: {text}").format(text=f"«{preview}»")
         else:
             return
         self.clips = [clip] + [c for c in self.clips if not (c[0] == "text" and c[:2] == clip[:2])]
         del self.clips[MAX_CLIPS:]
+        # Whole pictures take megabytes; only the newest few are kept.
+        old_images = {id(c) for c in [c for c in self.clips if c[0] == "image"][MAX_CLIP_IMAGES:]}
+        self.clips = [c for c in self.clips if id(c) not in old_images]
         self.notify(message, seconds=1.8)
 
     @staticmethod
@@ -1236,8 +1250,7 @@ class ExtrasMixin:
     def copy_clip(self, clip):
         self._clip_ignore_until = time.monotonic() + 0.5
         if clip[0] == "image":
-            # Only the thumbnail is kept, so the full picture is not copied back.
-            QApplication.clipboard().setPixmap(clip[2])
+            QApplication.clipboard().setImage(clip[3])
         else:
             QApplication.clipboard().setText(clip[1])
         self.clips = [clip] + [c for c in self.clips if c is not clip]
@@ -1280,7 +1293,7 @@ class ExtrasMixin:
                 painter.drawPixmap(thumb, clip[2], QRectF(clip[2].rect()))
                 painter.restore()
                 text_x = thumb.right() + 10.0
-            text = " ".join(clip[1].split())
+            text = clip[1] if clip[0] == "image" else clip[3]
             width = row.right() - 12.0 - text_x
             self.draw_text(painter, QRectF(text_x, row.top(), width, row.height()),
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -2434,6 +2447,12 @@ class ExtrasMixin:
         if result is None:
             if manual:
                 self.notify(tr("Не удалось проверить обновления"), force=True)
+            else:
+                # Often the network is not up yet right after Windows starts:
+                # try again soon instead of a day later.
+                self._next_update_check = min(
+                    self._next_update_check, time.monotonic() + UPDATE_RETRY_SEC
+                )
             return
         version, url, installer = result
         self.update_url = url

@@ -16,7 +16,7 @@ from PyQt6.QtGui import (
 from island_i18n import LANGUAGE_CODES, register, system_language, tr
 
 APP_NAME = "Default Island"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 # Where new versions are published; the update check reads its releases.
 GITHUB_REPO = "lourchik69/default-island"
 APP_DATA_DIR = os.path.join(
@@ -162,6 +162,8 @@ DEFAULT_CONFIG = {
     "privacy_dots_place": "inside",
     # Each line of the lyrics translated into the interface language (Google).
     "lyrics_translate": False,
+    # Videos on youtube.com count as music (YouTube Music always does).
+    "youtube_video": False,
     # Synced lyrics: the track name and artist are sent to lrclib.net.
     "lyrics_enabled": False,
     # Sung words fill with the track's colour, karaoke style.

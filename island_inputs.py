@@ -481,8 +481,9 @@ class BrightnessWatch:
                     return  # no built-in screen: nothing to watch
                 self._level = int(items[0].CurrentBrightness)
                 self._stop.wait(0.6)
-        except Exception:
-            _log.info("Screen brightness is not available", exc_info=True)
+        except Exception as error:
+            # The usual case on a desktop: the monitor has no brightness control.
+            _log.info("Screen brightness is not available (%s)", type(error).__name__)
         finally:
             self._level = None
             pythoncom.CoUninitialize()

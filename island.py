@@ -10,6 +10,7 @@ import math
 import os
 import queue
 import random
+import re
 import socket
 import sys
 import threading
@@ -148,9 +149,15 @@ def send_media_key(key):
     keybd_event(key, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
 
 
-def find_media_window_title():
-    """Title of a visible player window; used only when Windows media
-    sessions are unavailable."""
+_window_titles = (0.0, ())
+
+
+def visible_window_titles(max_age=1.0):
+    """Titles of the visible top-level windows, reused for `max_age` seconds."""
+    global _window_titles
+    now = time.monotonic()
+    if now - _window_titles[0] < max_age:
+        return _window_titles[1]
     titles = []
     WNDENUMPROC = ctypes.WINFUNCTYPE(
         ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
@@ -173,19 +180,35 @@ def find_media_window_title():
             if length > 0:
                 buff = ctypes.create_unicode_buffer(length + 1)
                 get_window_text(hwnd, buff, length + 1)
-                lowered = buff.value.casefold()
-                if (
-                    "soundcloud" in lowered
-                    or "spotify" in lowered
-                    or "youtube" in lowered
-                ):
-                    titles.append(buff.value)
+                titles.append(buff.value)
         return True
 
     enum_windows = user32_function(
         "EnumWindows", [WNDENUMPROC, ctypes.wintypes.LPARAM], ctypes.wintypes.BOOL
     )
     enum_windows(WNDENUMPROC(callback), 0)
+    _window_titles = (now, tuple(titles))
+    return _window_titles[1]
+
+
+# "Title - YouTube - Brave", "Title — YouTube — Mozilla Firefox"; not YouTube Music.
+_YOUTUBE_WINDOW = re.compile(r"[-–—]\s*youtube\s*(?:[-–—]|$)", re.IGNORECASE)
+
+
+def is_youtube_window(title):
+    return bool(_YOUTUBE_WINDOW.search(title))
+
+
+def find_media_window_title(skip_youtube=False):
+    """Title of a visible player window; used only when Windows media
+    sessions are unavailable."""
+    titles = []
+    for title in visible_window_titles():
+        lowered = title.casefold()
+        if skip_youtube and is_youtube_window(title):
+            continue
+        if "soundcloud" in lowered or "spotify" in lowered or "youtube" in lowered:
+            titles.append(title)
     titles.sort(key=lambda title: "soundcloud" not in title.casefold())
     for title in titles:
         clean = title.replace(" - Brave", "").replace(" - Google Chrome", "").strip()
@@ -256,6 +279,73 @@ def same_track(first, second):
         for a in left
         for b in right
     )
+
+
+class VideoFilter:
+    """Recognises videos on youtube.com (not YouTube Music), which the island
+    leaves out unless the "youtube_video" setting is on.
+
+    The browser extension says outright that a tab is YouTube. Windows only
+    names the video, so a session counts as one when a browser window shows
+    that title as a YouTube page. A video recognised once stays recognised
+    while it keeps being seen, also after its tab goes to the background.
+    """
+
+    # A recognised title is forgotten this long after it was last confirmed.
+    MEMORY_SEC = 600.0
+    # A title found not to be a video is looked at again after this long.
+    RECHECK_SEC = 10.0
+
+    def __init__(self, tabs=None):
+        self.hide = True
+        # BrowserTabs, for videos playing in a tab behind the one in front.
+        self.tabs = tabs
+        self._lock = threading.Lock()
+        self._videos = {}  # normalized title -> time.monotonic() last confirmed
+        self._not_videos = {}  # normalized title -> time.monotonic() checked
+
+    def remember(self, title):
+        key = normalize_title(title)
+        if not key:
+            return
+        with self._lock:
+            self._videos[key] = time.monotonic()
+            if len(self._videos) > 64:
+                del self._videos[min(self._videos, key=self._videos.get)]
+
+    def is_video(self, title):
+        key = normalize_title(title)
+        if not key:
+            return False
+        now = time.monotonic()
+        with self._lock:
+            seen = self._videos.get(key)
+            known = seen is not None and now - seen < self.MEMORY_SEC
+            checked = self._not_videos.get(key)
+        if self._shown_as_video(key, visible_window_titles()):
+            self.remember(title)
+            return True
+        if known:
+            with self._lock:
+                self._videos[key] = now  # still playing: keep it recognised
+            return True
+        if self.tabs is None or (checked is not None and now - checked < self.RECHECK_SEC):
+            return False
+        # Not in front: look through the tabs behind (a few milliseconds).
+        if self._shown_as_video(key, self.tabs.names(wait=0.4)):
+            self.remember(title)
+            return True
+        if not self.tabs.fresh():
+            return False  # the tabs were not read in time: ask again next round
+        with self._lock:
+            self._not_videos[key] = now
+            if len(self._not_videos) > 64:
+                del self._not_videos[min(self._not_videos, key=self._not_videos.get)]
+        return False
+
+    @staticmethod
+    def _shown_as_video(key, titles):
+        return any(is_youtube_window(title) and key in normalize_title(title) for title in titles)
 
 
 def measure_ping_ms(timeout=1.5):
@@ -354,9 +444,10 @@ class BridgeServer(threading.Thread):
     island reaches the page at once instead of waiting for the next report.
     """
 
-    def __init__(self, signals):
+    def __init__(self, signals, videos):
         super().__init__(daemon=True)
         self.signals = signals
+        self.videos = videos
         self.condition = threading.Condition()
         self.pending_commands = []
         # Only one tab may drive the island.
@@ -426,6 +517,16 @@ class BridgeServer(threading.Thread):
         tab = data.get("tab")
         tab = tab[:32] if isinstance(tab, str) else ""
         state = parse_bridge_state(data, now)
+        if state.site == "youtube" and self.videos.hide:
+            if state.has_track:
+                self.videos.remember(state.title)
+            with self.condition:
+                if tab == self.primary_tab:
+                    # Let go of the tab, so another one can take over.
+                    self.primary_tab = None
+                    self.primary_playing = False
+                    self.signals.report.emit(MediaState(updated=now, position_time=now))
+            return []
         with self.condition:
             if not self._claim_tab(tab, state, now):
                 return []
@@ -536,9 +637,10 @@ class MediaWorker(threading.Thread):
         "prev": VK_MEDIA_PREV_TRACK,
     }
 
-    def __init__(self, signals):
+    def __init__(self, signals, videos):
         super().__init__(daemon=True)
         self.signals = signals
+        self.videos = videos
         self.actions = queue.Queue()
         self.wake = threading.Event()
         self.stop_event = threading.Event()
@@ -604,7 +706,7 @@ class MediaWorker(threading.Thread):
         self.press_keys_for_pending_actions()
         now = time.perf_counter()
         state = MediaState(updated=now, position_time=now)
-        raw = find_media_window_title()
+        raw = find_media_window_title(skip_youtube=self.videos.hide)
         if raw:
             title = raw.split("|")[0].strip()
             artist = ""
@@ -649,6 +751,8 @@ class MediaWorker(threading.Thread):
                 is_current = session.source_app_user_model_id == current_app
             except Exception:
                 logging.debug("Could not read a Windows media session", exc_info=True)
+                continue
+            if self.videos.hide and self.videos.is_video(title):
                 continue
             rank = (
                 3 if status == SESSION_PLAYING
@@ -899,6 +1003,9 @@ class DynamicIsland(ExtrasMixin, QWidget):
         # Media sources: the browser extension and Windows media sessions.
         self.bridge_media = MediaState()
         self.system_media = MediaState()
+        # YouTube videos the island leaves out; shared with the media threads.
+        self.videos = VideoFilter()
+        self.videos.hide = not self.config["youtube_video"]
         self.media_source = "system"
         self.shown_track = ("", "")
         self.other_player_since = None
@@ -1485,6 +1592,10 @@ class DynamicIsland(ExtrasMixin, QWidget):
         self.sync_ping_worker()
         self._volume_controls = None
         self.sync_volume_from_system()
+        self.videos.hide = not self.config["youtube_video"]
+        wake = getattr(self.worker, "wake", None)
+        if wake is not None:
+            wake.set()  # show or hide a video at once
         if not self.config["timer_button_enabled"]:
             self.timer_panel_open = False
         self.anim_timer.setInterval(self.frame_interval_ms())
@@ -1913,6 +2024,8 @@ class DynamicIsland(ExtrasMixin, QWidget):
             self.timer_persist_timer.stop()
             self.persist_config()
         self.worker.stop()
+        if self.videos.tabs is not None:
+            self.videos.tabs.stop()
         self.ping.stop()
         self.bridge.stop()
         self.stop_extra_services()
@@ -3436,13 +3549,20 @@ class DynamicIsland(ExtrasMixin, QWidget):
         self.bridge_signals.report.connect(self.on_bridge_report)
         self.bridge_signals.outdated.connect(self.on_outdated_extension)
         self.bridge_signals.downloads.connect(self.on_downloads_report)
-        self.bridge = BridgeServer(self.bridge_signals)
+        self.bridge = BridgeServer(self.bridge_signals, self.videos)
         self.bridge.start()
+        try:
+            from island_calls import BrowserTabs
+            self.videos.tabs = BrowserTabs()
+            self.videos.tabs.start()
+        except Exception:
+            logging.exception("Could not start reading the browser tabs")
+            self.videos.tabs = None
 
         self.media_signals = MediaSignals()
         self.media_signals.state.connect(self.on_system_report)
         self.media_signals.cover.connect(self.on_system_cover)
-        self.worker = MediaWorker(self.media_signals)
+        self.worker = MediaWorker(self.media_signals, self.videos)
         self.worker.start()
 
         self.ping = PingWorker()
